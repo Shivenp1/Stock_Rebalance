@@ -1,0 +1,168 @@
+from alpaca.trading.client import TradingClient
+from alpaca.trading.requests import MarketOrderRequest
+from alpaca.trading.enums import OrderSide, TimeInForce
+from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest
+from alpaca.data.timeframe import TimeFrame
+from datetime import datetime, timedelta
+
+
+def calculate_moving_average(prices, days):
+    if len(prices) >= days:
+        return sum(prices[-days:]) / days
+    return None
+
+
+def golden_cross_check(client, symbol):
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=250) 
+    request_params = StockBarsRequest(
+        symbol_or_symbols=symbol,
+        timeframe=TimeFrame.Day,
+        start=start_date.strftime('%Y-%m-%d'),
+        end=end_date.strftime('%Y-%m-%d')
+    )
+    
+    bars = client.get_stock_bars(request_params)
+    if bars and symbol in bars:
+        prices = [bar.close for bar in bars[symbol]]
+        short_term_ma = calculate_moving_average(prices, 50)
+        long_term_ma = calculate_moving_average(prices, 200)
+        
+        if short_term_ma and long_term_ma:
+            if short_term_ma > long_term_ma:
+                return 'golden_cross'
+            elif short_term_ma < long_term_ma:
+                return 'bearish'
+    return None
+
+def rebalance_by_golden_cross(api_key, secret_key):
+    trading_client = TradingClient(api_key, secret_key)
+    data_client = StockHistoricalDataClient(api_key, secret_key)
+    positions = trading_client.get_all_positions()
+    
+    for position in positions:
+        signal = golden_cross_check(data_client, position.symbol)
+        
+        if signal == 'golden_cross':
+            current_price = float(position.current_price)
+            qty_to_buy = int(3000 / current_price) 
+            if qty_to_buy > 0:
+                order_data = MarketOrderRequest(
+                    symbol=position.symbol,
+                    qty=qty_to_buy,
+                    side=OrderSide.BUY,
+                    time_in_force=TimeInForce.DAY
+                )
+                trading_client.submit_order(order_data)
+                print(f"Golden cross detected! Bought {qty_to_buy} shares of {position.symbol}")
+        
+        elif signal == 'bearish':
+            qty_to_sell = int(position.qty) // 2 
+            if qty_to_sell > 0:
+                order_data = MarketOrderRequest(
+                    symbol=position.symbol,
+                    qty=qty_to_sell,
+                    side=OrderSide.SELL,
+                    time_in_force=TimeInForce.DAY
+                )
+                trading_client.submit_order(order_data)
+                print(f"Bearish signal detected! Sold {qty_to_sell} shares of {position.symbol}")
+
+def calculate_performance(client, symbol):
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=365)
+    request_params = StockBarsRequest(
+        symbol_or_symbols=symbol,
+        timeframe=TimeFrame.Day,
+        start=start_date.strftime('%Y-%m-%d'),
+        end=end_date.strftime('%Y-%m-%d')
+    )
+    bars = client.get_stock_bars(request_params)
+    if bars and symbol in bars:
+        prices = [bar.close for bar in bars[symbol]]
+        if prices:
+            return (prices[-1] - prices[0]) / prices[0]
+    return 0
+
+
+def rebalance_by_performance(api_key, secret_key):
+    trading_client = TradingClient(api_key, secret_key)
+    data_client = StockHistoricalDataClient(api_key, secret_key)
+    positions = trading_client.get_all_positions()
+    performances = {position.symbol: calculate_performance(data_client, position.symbol) for position in positions}
+    best_performers = sorted(performances, key=performances.get, reverse=True)[:len(positions)//2]
+    
+    for position in positions:
+        if position.symbol in best_performers:
+            current_price = float(position.current_price)
+            qty_to_buy = int(1000 / current_price)
+            if qty_to_buy > 0:
+                order_data = MarketOrderRequest(
+                    symbol=position.symbol,
+                    qty=qty_to_buy,
+                    side=OrderSide.BUY,
+                    time_in_force=TimeInForce.DAY
+                )
+                trading_client.submit_order(order_data)
+                print(f"Bought {qty_to_buy} shares of {position.symbol}")
+
+def rebalance_portfolio(api_key, secret_key):
+    client = TradingClient(api_key, secret_key)
+    positions = client.get_all_positions()
+    total_portfolio_value = sum(float(position.market_value) for position in positions)
+    num_stocks = len(positions)
+    target_weight = 1 / num_stocks
+    target_value = total_portfolio_value * target_weight
+    
+    for position in positions:
+        current_weight = float(position.market_value) / total_portfolio_value
+        current_price = float(position.current_price)
+        qty = int(position.qty)
+        weight_diff = current_weight - target_weight
+        
+        if weight_diff > 0.05:
+            excess_value = total_portfolio_value * (weight_diff - 0.05)
+            shares_to_sell = int(excess_value / current_price)
+            
+            if shares_to_sell > 0:
+                order_data = MarketOrderRequest(
+                    symbol=position.symbol,
+                    qty=shares_to_sell,
+                    side=OrderSide.SELL,
+                    time_in_force=TimeInForce.DAY
+                )
+                client.submit_order(order_data)
+                print(f"Sold {shares_to_sell} shares of {position.symbol}")
+        
+        elif weight_diff < -0.05:
+            deficit_value = total_portfolio_value * (-weight_diff - 0.05)
+            shares_to_buy = int(deficit_value / current_price)
+            
+            if shares_to_buy > 0:
+                order_data = MarketOrderRequest(
+                    symbol=position.symbol,
+                    qty=shares_to_buy,
+                    side=OrderSide.BUY,
+                    time_in_force=TimeInForce.DAY
+                )
+                client.submit_order(order_data)
+                print(f"Bought {shares_to_buy} shares of {position.symbol}")
+
+
+def main():
+    api_key = "PK8J0Z1YWJQ53DWBOW2S"
+    secret_key = "mzwRDXyGC6v5U9AUFaBschWmWJOx0Rx2rbhQKF9G"
+    
+    choice = input("Choose rebalancing strategy: 1) Weight Rebalance 2) Performance Rebalance 3) Golden Cross Rebalance: ")
+    
+    if choice == '1':
+        rebalance_portfolio(api_key, secret_key)
+    elif choice == '2':
+        rebalance_by_performance(api_key, secret_key)
+    elif choice == '3':
+        rebalance_by_golden_cross(api_key, secret_key)
+    else:
+        print("Invalid choice. Please select 1, 2, or 3.")
+
+main()
